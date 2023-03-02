@@ -1,0 +1,7 @@
+push:
+  - name: build
+    command: go build
+  - name: test
+    command: go test
+  - name: deploy
+    command: ./deploy.sh
