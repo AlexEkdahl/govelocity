@@ -2,232 +2,107 @@ package process
 
 import (
 	"fmt"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 )
 
-// Manager is a process manager that manages a collection of processes.
-type Manager struct {
+type Storer interface {
+	Open() error
+	Close() error
+	CreateTable() error
+	InsertProcess(p *Process) error
+	GetProcesses() ([]*Process, error)
+	RemoveProcess(pid int) error
+}
+
+type ProcessManager struct {
 	processes map[string]*Process
-	lock      sync.RWMutex
+	storer    Storer
 }
 
-// NewManager creates a new process manager.
-func NewManager() *Manager {
-	return &Manager{
-		processes: make(map[string]*Process),
+func NewProcessManager(db Storer) *ProcessManager {
+	manager := &ProcessManager{
+		processes: restoreProcesses(db),
+		storer:    db,
 	}
+
+	return manager
 }
 
-// AddProcess adds a process to the process manager.
-func (m *Manager) AddProcess(p *Process) error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
+func restoreProcesses(db Storer) map[string]*Process {
+	processes := make(map[string]*Process)
 
-	if _, ok := m.processes[p.Name]; ok {
-		return fmt.Errorf("process '%s' already exists", p.Name)
+	// Retrieve processes from database
+	processList, err := db.GetProcesses()
+	if err != nil {
+		return processes
 	}
 
-	m.Start()
-	m.processes[p.Name] = p
-	return nil
-}
-
-// RemoveProcess removes a process from the process manager.
-func (m *Manager) RemoveProcess(name string) error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	if _, ok := m.processes[name]; !ok {
-		return fmt.Errorf("process '%s' does not exist", name)
+	// Convert process list to map
+	for _, p := range processList {
+		processes[p.Name] = RestoreProcess(p)
 	}
 
-	delete(m.processes, name)
-	return nil
-}
-
-// Start starts all the processes managed by the process manager.
-func (m *Manager) Start() error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	// Start each process
-	for _, p := range m.processes {
-		if p.Autostart {
-			if err := p.Start(); err != nil {
-				return fmt.Errorf("failed to start process '%s': %v", p.Name, err)
-			}
-		}
-	}
-
-	// Wait for signals to stop the process manager
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	<-ch
-
-	// Stop each process
-	for _, p := range m.processes {
-		if p.IsRunning() {
-			if err := p.Stop(); err != nil {
-				return fmt.Errorf("failed to stop process '%s': %v", p.Name, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// Status returns the status of the process with the given name.
-func (m *Manager) Status(name string) Status {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	if p, ok := m.processes[name]; ok {
-		return p.Status()
-	}
-
-	return StatusUnknown
-}
-
-// Statuses returns the statuses of all the processes managed by the process manager.
-func (m *Manager) Statuses() map[string]Status {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	statuses := make(map[string]Status)
-	for name, p := range m.processes {
-		statuses[name] = p.Status()
-	}
-
-	return statuses
-}
-
-// Stop stops all the processes managed by the process manager.
-func (m *Manager) Stop() error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	// Stop each process
-	for _, p := range m.processes {
-		if p.IsRunning() {
-			if err := p.Stop(); err != nil {
-				return fmt.Errorf("failed to stop process '%s': %v", p.Name, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// Wait waits for all the processes managed by the process manager to exit.
-func (m *Manager) Wait() {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	for _, p := range m.processes {
-		p.Wait()
-	}
-}
-
-// Restart restarts all the processes managed by the process manager.
-func (m *Manager) Restart() error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	// Stop each process
-	for _, p := range m.processes {
-		if p.IsRunning() {
-			if err := p.Restart(); err != nil {
-				return fmt.Errorf("failed to restart process '%s': %v", p.Name, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// StopProcess stops a single process managed by the process manager.
-func (m *Manager) StopProcess(name string) error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	if p, ok := m.processes[name]; ok {
-		return p.Stop()
-	}
-
-	return fmt.Errorf("process '%s' not found", name)
-}
-
-// StartProcess starts a single process managed by the process manager.
-func (m *Manager) StartProcess(name string) error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	if p, ok := m.processes[name]; ok {
-		return p.Start()
-	}
-
-	return fmt.Errorf("process '%s' not found", name)
-}
-
-// StopAll stops all processes managed by the process manager.
-func (m *Manager) StopAll() {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	for _, p := range m.processes {
-		if p.IsRunning() {
-			_ = p.Stop()
-		}
-	}
-}
-
-// Get returns the process with the given name, or an error if it doesn't exist.
-func (m *Manager) Get(name string) (*Process, error) {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	p, ok := m.processes[name]
-	if !ok {
-		return nil, fmt.Errorf("process '%s' not found", name)
-	}
-	return p, nil
-}
-
-// GetProcess returns the process with the given name, or an error if it doesn't exist.
-func (m *Manager) GetProcess(name string) (*Process, error) {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	p, ok := m.processes[name]
-	if !ok {
-		return nil, fmt.Errorf("process '%s' not found", name)
-	}
-	return p, nil
-}
-
-// ListProcesses returns a slice of all the processes managed by the process manager.
-func (m *Manager) ListProcesses() []*Process {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
-
-	var processes []*Process
-	for _, p := range m.processes {
-		processes = append(processes, p)
-	}
 	return processes
 }
 
-// RestartProcess restarts a single process managed by the process manager.
-func (m *Manager) RestartProcess(name string) error {
-	m.lock.RLock()
-	defer m.lock.RUnlock()
+func (pm *ProcessManager) Add(name, path string) error {
+	p := NewProcess(name, path)
 
-	if p, ok := m.processes[name]; ok {
-		return p.Restart()
+	if err := p.start(); err != nil {
+		return fmt.Errorf("error starting process: %w", err)
 	}
 
-	return fmt.Errorf("process '%s' not found", name)
+	pm.processes[name] = p
+
+	if err := pm.storer.InsertProcess(p); err != nil {
+		return fmt.Errorf("error saving process: %w", err)
+	}
+
+	return nil
+}
+
+func (pm *ProcessManager) Start(name string) error {
+	p := pm.processes[name]
+	if err := p.start(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (pm *ProcessManager) List() {
+	// TODO
+	fmt.Println("pm.processes", pm.processes)
+}
+
+func (pm *ProcessManager) Remove(name string) error {
+	p, ok := pm.processes[name]
+	if !ok {
+		return fmt.Errorf("process with name %s not found", name)
+	}
+
+	// Kill the process if it is still running
+	if p.cmd.ProcessState == nil {
+		if err := p.stop(); err != nil {
+			fmt.Println("err", err)
+			// return err
+		}
+	}
+
+	// Remove the process from the map
+	delete(pm.processes, name)
+
+	// Remove the process from the database
+	if err := pm.storer.RemoveProcess(p.PID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (pm *ProcessManager) Stop(name string) error {
+	p := pm.processes[name]
+	if err := p.stop(); err != nil {
+		return err
+	}
+
+	return nil
 }
